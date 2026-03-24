@@ -14,6 +14,7 @@ find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core)
 
 add_executable(Klient
   main.cpp
+  protocol.h
 )
 target_link_libraries(Klient PRIVATE Qt${QT_VERSION_MAJOR}::Core ws2_32)
 
