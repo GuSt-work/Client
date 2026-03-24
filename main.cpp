@@ -5,6 +5,7 @@
 #include <QDebug>
 #include <fstream>
 #include "protocol.h"
+#include<thread>
 
 
 int GetUDP(const char* udpArg){
@@ -44,29 +45,28 @@ void SendFileInfo(SOCKET sock, const char* udp, const char* fileName){
     std::cout << "File info sent: " << message;
 }
 
-bool ParseMessage(SOCKET serv_sock, uint32_t& id){
-    std::string buffer;
+bool ParseMessage(SOCKET &serv_sock, std::string& buffer, uint32_t& id){
     char tmp[128];
 
-    while(true){
-        int received = recv(serv_sock, tmp, sizeof(tmp), 0);
-        if(received <= 0){
-            std:: cout  << "Recv error \n";
-            return false;
-        }
-
-        buffer.append(tmp, received);
-        size_t pos = buffer.find('\n');
-
-        if(pos != std::string::npos){
-            std::string message = buffer.substr(0, pos);
-            if (message.rfind("ACK ", 0) != 0)
-                return false;
-
-            id = std::stoul(message.substr(4));
-            return true;
-        }
+    int received = recv(serv_sock, tmp, sizeof(tmp), 0);
+    if(received <= 0){
+        return false;
     }
+
+    buffer.append(tmp, received);
+    size_t pos = buffer.find('\n');
+
+    if(pos != std::string::npos){
+        std::string message = buffer.substr(0, pos);
+        buffer.erase(0, pos+1);
+
+        if (message.rfind("ACK ", 0) != 0)
+            return false;
+
+        id = std::stoul(message.substr(4));
+        return true;
+    }
+    return false;
 }
 
 bool ReadFile(const char *filePath, std::vector<char>& data){
@@ -116,7 +116,34 @@ void CreatePacketsState(std::vector<Packet> &packets, std::vector<PacketState> &
     }
 }
 
-bool CreateUDP(char *ip, char *portNumber, std::vector<PacketState> &states){
+bool CheckTime(const std::chrono::steady_clock::time_point &timePt, const int &timeoutMs){
+    if(timePt == std::chrono::steady_clock::time_point{})
+        return true;
+
+    auto now = std::chrono::steady_clock::now();
+    bool result = (std::chrono::duration_cast<std::chrono::milliseconds>(now - timePt).count() > timeoutMs);
+    return result;
+}
+
+bool SendAll(SOCKET &sock, const std::string& message) {
+    int totalSent = 0;
+    int length = message.size();
+
+    while (totalSent < length) {
+        int sent = send(sock, message.c_str() + totalSent, length - totalSent, 0);
+
+        if (sent == SOCKET_ERROR) {
+            std:: cout << "Failed send MEssage" << WSAGetLastError() << "\n";
+            return false;
+        }
+
+        totalSent += sent;
+    }
+    qDebug() << "Message send!";
+    return true;
+}
+
+bool CreateUDP(SOCKET &sock_tcp, char *ip, char *portNumber, std::vector<PacketState> &states, int timeout){
     SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if(sock == INVALID_SOCKET){
         std::cout << "CLIET: udp socket creation failed \n";
@@ -128,10 +155,43 @@ bool CreateUDP(char *ip, char *portNumber, std::vector<PacketState> &states){
     addrServ.sin_addr.s_addr = inet_addr(ip);
     addrServ.sin_port = htons((u_short)strtol(portNumber, NULL, 10));
 
-    for(auto &state : states){
-        sendto(sock, (char*)&state.pkt, sizeof(uint32_t)*2 + state.pkt.size, 0, (sockaddr*)&addrServ, sizeof(addrServ));
+    int count = 0;
+    std::string tcpBuffer;
+    bool allAcked = false;
+    while(count <11){
+        //++count;
+        for(auto &state : states){
+            if(state.acknowledged)
+                continue;
 
-        state.lastSend = std::chrono::steady_clock::now();
+            if(!CheckTime(state.lastSend, timeout))
+                continue;
+
+            sendto(sock, (char*)&state.pkt, sizeof(uint32_t)*2 + state.pkt.size, 0, (sockaddr*)&addrServ, sizeof(addrServ));
+            state.lastSend = std::chrono::steady_clock::now();
+        }
+
+        uint32_t ackId;
+        bool parceMes = ParseMessage(sock_tcp, tcpBuffer, ackId);
+        if(parceMes && ackId < states.size())
+        {
+            std::cout << "Packet " << ackId << " Is Come! \n";
+            qDebug() << "Packet " << ackId << " Is Come! \n";
+            states[ackId].acknowledged = true;
+        }
+
+        allAcked = true;
+        for(auto &state : states){
+            if(!state.acknowledged){
+                allAcked = false;
+                break;
+            }
+        }
+        if(allAcked){
+            SendAll(sock_tcp, "FIN\n");
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
     return true;
@@ -181,7 +241,11 @@ int main(int argc, char *argv[])
 
 
     uint32_t id;
-    bool isReadyServ = ParseMessage(sock, id);
+    std::string buffer;
+    bool isReadyServ = false;
+    while(!isReadyServ){
+        isReadyServ = ParseMessage(sock, buffer, id);
+    }
     if(!isReadyServ){
         closesocket(sock);
         WSACleanup();
@@ -202,8 +266,8 @@ int main(int argc, char *argv[])
 
     std::vector<PacketState> states;
     CreatePacketsState(packets, states);
-
-    SOCKET udp_sock = CreateUDP(argv[1], argv[3], states);
+    std::cout << "CreateUDP   " << "\n";
+    bool isSendFile = CreateUDP(sock, argv[1], argv[3], states, GetUDP(argv[5]));
 
     closesocket(sock);
     WSACleanup();

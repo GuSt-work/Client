@@ -16,7 +16,7 @@ struct Packet {
 struct PacketState {
     Packet pkt;
     bool acknowledged = false;
-    std::chrono::steady_clock::time_point lastSend;
+    std::chrono::steady_clock::time_point lastSend = std::chrono::steady_clock::time_point{};
 };
 
 
