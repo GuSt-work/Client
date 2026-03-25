@@ -6,9 +6,10 @@
 #include <fstream>
 #include "protocol.h"
 #include<thread>
+#include<filesystem>
 
 
-int GetUDP(const char* udpArg){
+int ParsePortUDP(const char* udpArg){
     int udpPort;
     try {
         udpPort = std::stoi(udpArg);
@@ -16,20 +17,20 @@ int GetUDP(const char* udpArg){
             return -1;
     }
     catch(...) {
-        std::cerr << "Invalid UDP port\n";
+        std::cerr << "Invalid UDP port" << "\n";
         return -1;
     }
     return udpPort;
 }
 
-std::string GetMessage(const char* udp, const char* fileName){
-    int udpPort = GetUDP(udp);
+std::string FormMessage(const char* udp, const char* fileName){
+    int udpPort = ParsePortUDP(udp);
     std::string message = std::string(fileName) + ";" + std::to_string(udpPort) + "\n";
     return message;
 }
 
 void SendFileInfo(SOCKET sock, const char* udp, const char* fileName){
-    auto message = GetMessage(udp, fileName);
+    auto message = FormMessage(udp, fileName);
 
     int totalSent = 0;
     int messLenght = message.size();
@@ -37,12 +38,12 @@ void SendFileInfo(SOCKET sock, const char* udp, const char* fileName){
     while(totalSent < messLenght){
         int sent = send(sock, message.c_str() + totalSent, messLenght - totalSent, 0);
         if(sent == SOCKET_ERROR){
-            std:: cout << "Failed send MEssage" << WSAGetLastError() << "\n";
+            std::cerr << "Failed send MEssage" << WSAGetLastError() << "\n";
             return;
         }
         totalSent += sent;
     }
-    std::cout << "File info sent: " << message;
+    std::cout << "File info sent: " << message << std::endl;
 }
 
 bool ParseMessage(SOCKET &serv_sock, std::string& buffer, uint32_t& id){
@@ -54,7 +55,7 @@ bool ParseMessage(SOCKET &serv_sock, std::string& buffer, uint32_t& id){
         int err = WSAGetLastError();
 
         if (err != WSAEWOULDBLOCK) {
-            std::cerr << "recvfrom error: " << err << std::endl;
+            std::cerr << "recvfrom error: " << err <<"\n";
             return false;
         }
     }
@@ -81,14 +82,14 @@ bool ReadFile(const char *filePath, std::vector<char>& data){
     std::ifstream file(filePath, std::ios::binary);
 
     if(!file){
-        std::cout << "Failed to open file \n";
+        std::cerr << "Failed to open file" << "\n";
         return false;
     }
     file.seekg(0, std::ios::end);
     size_t size = file.tellg();
 
     if (size > 10 * 1024 * 1024) {
-        std::cout << "File very large\n";
+        std::cerr << "File very large" << "\n";
         return false;
     }
 
@@ -141,31 +142,30 @@ bool SendAll(SOCKET &sock, const std::string& message) {
         int sent = send(sock, message.c_str() + totalSent, length - totalSent, 0);
 
         if (sent == SOCKET_ERROR) {
-            std:: cout << "Failed send MEssage" << message << WSAGetLastError() << "\n";
-            std:: cout << "Failed send MEssage" << message << WSAGetLastError() << "\n";
+            std::cerr << "Failed send Message" << message << WSAGetLastError() << "\n";
             return false;
         }
 
         totalSent += sent;
     }
-    qDebug() << "Message send!";
+    std::cout << message << std::endl;
     return true;
 }
 
-bool CreateUDP(SOCKET &sock_tcp, char *ip, char *portNumber, std::vector<PacketState> &states, int timeout){
-    u_long mode = 1; // 1 = non-blocking
-    ioctlsocket(sock_tcp, FIONBIO, &mode);
+bool SendPackets(SOCKET &sockTCP, char *ip, char *portNumber, std::vector<PacketState> &states, int timeout){
+    u_long mode = 1;
+    ioctlsocket(sockTCP, FIONBIO, &mode);
 
-    SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if(sock == INVALID_SOCKET){
-        std::cout << "CLIET: udp socket creation failed \n";
+    SOCKET sockUDP = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if(sockUDP == INVALID_SOCKET){
+        std::cerr << "UDP socket creation failed" << "\n";
         return INVALID_SOCKET;
     }
 
     sockaddr_in addrServ;
     addrServ.sin_family = AF_INET;
     addrServ.sin_addr.s_addr = inet_addr(ip);
-    addrServ.sin_port = htons((u_short)strtol(portNumber, NULL, 10));
+    addrServ.sin_port = htons((u_short)std::stoi(portNumber));
 
     int count = 0;
     std::string tcpBuffer;
@@ -179,17 +179,23 @@ bool CreateUDP(SOCKET &sock_tcp, char *ip, char *portNumber, std::vector<PacketS
             if(!CheckTime(state.lastSend, timeout))
                 continue;
 
-            sendto(sock, (char*)&state.pkt, sizeof(uint32_t)*2 + state.pkt.size, 0, (sockaddr*)&addrServ, sizeof(addrServ));
+            sendto(sockUDP, (char*)&state.pkt, sizeof(uint32_t)*2 + state.pkt.size, 0, (sockaddr*)&addrServ, sizeof(addrServ));
             state.lastSend = std::chrono::steady_clock::now();
         }
 
         uint32_t ackId;
-        bool parceMes = ParseMessage(sock_tcp, tcpBuffer, ackId);
+        bool parceMes = ParseMessage(sockTCP, tcpBuffer, ackId);
         if(parceMes && ackId < states.size())
         {
-            std::cout << "Packet " << ackId << " Is Come! \n";
-            qDebug() << "Packet " << ackId << " Is Come! \n";
+            std::cout << "Packet " << ackId << " Is Come!" << std::endl;
             states[ackId].acknowledged = true;
+        }
+        if(!parceMes){
+            int err = WSAGetLastError();
+            if(err == WSAECONNRESET || err == WSAENOTSOCK){
+                std::cerr << "Connection closed by server\n";
+                break;
+            }
         }
 
         allAcked = true;
@@ -200,56 +206,94 @@ bool CreateUDP(SOCKET &sock_tcp, char *ip, char *portNumber, std::vector<PacketS
             }
         }
         if(allAcked){
-            SendAll(sock_tcp, "FIN\n");
+            SendAll(sockTCP, "FIN\n");
             break;
-
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    closesocket(sockUDP);
+    return true;
+}
+
+bool ValidateArgs(int argc, char* argv[]){
+    if(argc != 6){
+        std::cerr << "[ERROR] Invalid number of arguments\n";
+        return false;
     }
 
+    sockaddr_in sa;
+    if(inet_pton(AF_INET, argv[1], &(sa.sin_addr)) != 1){
+        std::cerr << "[ERROR] Invalid IP address\n";
+        return false;
+    }
+
+    for(int i = 2; i < 4; i++){
+        int port = 0;
+        try{
+            port = std::stoi((argv[i]));
+        } catch(...){
+            std::cerr << "[ERROR] Port is not a number\n";
+            return false;
+        }
+        if(port <=0 || port > 65535){
+            std::cerr << "[ERROR] Invalid port \n";
+            return false;
+        }
+    }
+
+    std::filesystem::path dir(argv[4]);
+    if(dir.empty()){
+        std::cerr << "[ERROR] File path is empty\n";
+        return false;
+    }
+    if (!std::filesystem::exists(dir)) {
+        std::cerr << "[ERROR] Fale is not exist\n";
+        return false;
+    }
+
+    try {
+        int timeout = std::stoi(argv[5]);
+        if (timeout <= 0) {
+            std::cerr << "[ERROR] Invalid timeout value\n";
+            return false;
+        }
+    } catch (const std::exception &e) {
+        std::cerr << "[ERROR] Invalid timeout value\n";
+        return false;
+    }
     return true;
 }
 
 int main(int argc, char *argv[])
 {
+    if(!ValidateArgs(argc, argv))
+        return -1;
+
     WSADATA wsa;
     if(WSAStartup(MAKEWORD(2,2), &wsa) != 0){
-        std::cout << "CLIET: WSAStartUp failed \n";
-        return 1;
+        std::cerr << "WSAStartUp failed\n";
+        return -1;
     }
 
     SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if(sock == INVALID_SOCKET){
-        std::cout << "CLIET: socket creation failed \n";
+        std::cerr << "Socket creation failed\n";
         WSACleanup();
-        return 1;
+        return -1;
     }
-
-    sockaddr_in addr;
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = inet_addr(argv[1]);
-    addr.sin_port = htons((u_short)strtol(argv[2], NULL, 10));
-
-    //if(bind(sock, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR){
-        //std:: cout << "CLIET: bind setting error \n";
-        //return 1;
-    //}
-    std::cout << "CLIET: ZABINDILI \n";
 
     sockaddr_in addrServ;
     addrServ.sin_family = AF_INET;
     addrServ.sin_addr.s_addr = inet_addr(argv[1]);
-    addrServ.sin_port = htons((u_short)strtol(argv[2], NULL, 10));
+    addrServ.sin_port = htons((u_short)std::stoi(argv[2]));
 
     if(connect(sock, (sockaddr*)&addrServ, sizeof(addrServ)) != 0){
         int err = WSAGetLastError();
-        std::cout << "CLIET: NO_CONNECT " << err << "\n";
+        std::cerr << "Client connect failed " << err << "\n";
         closesocket(sock);
         WSACleanup();
+        return -1;
     }
 
-
-    std::cout << "CONNECT" << "\n";
     SendFileInfo(sock, argv[3], argv[4]);
 
 
@@ -265,7 +309,7 @@ int main(int argc, char *argv[])
         return -1;
     }
 
-    std::cout << "SERVER GETTING   " << id << "\n";
+    std::cout << "UDP socket ready" << std::endl;
     std::vector<char> myFile;
     bool isReadFile = ReadFile(argv[4], myFile);
     if(!isReadFile){
@@ -279,8 +323,9 @@ int main(int argc, char *argv[])
 
     std::vector<PacketState> states;
     CreatePacketsState(packets, states);
-    std::cout << "CreateUDP   " << "\n";
-    bool isSendFile = CreateUDP(sock, argv[1], argv[3], states, GetUDP(argv[5]));
+    std::cout << "File split into " << packets.size() << " packets" << std::endl;
+
+    SendPackets(sock, argv[1], argv[3], states, ParsePortUDP(argv[5]));
 
     closesocket(sock);
     WSACleanup();
