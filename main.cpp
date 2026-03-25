@@ -49,11 +49,19 @@ bool ParseMessage(SOCKET &serv_sock, std::string& buffer, uint32_t& id){
     char tmp[128];
 
     int received = recv(serv_sock, tmp, sizeof(tmp), 0);
-    if(received <= 0){
-        return false;
+
+    if (received == SOCKET_ERROR) {
+        int err = WSAGetLastError();
+
+        if (err != WSAEWOULDBLOCK) {
+            std::cerr << "recvfrom error: " << err << std::endl;
+            return false;
+        }
+    }
+    else{
+        buffer.append(tmp, received);
     }
 
-    buffer.append(tmp, received);
     size_t pos = buffer.find('\n');
 
     if(pos != std::string::npos){
@@ -133,7 +141,8 @@ bool SendAll(SOCKET &sock, const std::string& message) {
         int sent = send(sock, message.c_str() + totalSent, length - totalSent, 0);
 
         if (sent == SOCKET_ERROR) {
-            std:: cout << "Failed send MEssage" << WSAGetLastError() << "\n";
+            std:: cout << "Failed send MEssage" << message << WSAGetLastError() << "\n";
+            std:: cout << "Failed send MEssage" << message << WSAGetLastError() << "\n";
             return false;
         }
 
@@ -144,6 +153,9 @@ bool SendAll(SOCKET &sock, const std::string& message) {
 }
 
 bool CreateUDP(SOCKET &sock_tcp, char *ip, char *portNumber, std::vector<PacketState> &states, int timeout){
+    u_long mode = 1; // 1 = non-blocking
+    ioctlsocket(sock_tcp, FIONBIO, &mode);
+
     SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if(sock == INVALID_SOCKET){
         std::cout << "CLIET: udp socket creation failed \n";
@@ -158,8 +170,8 @@ bool CreateUDP(SOCKET &sock_tcp, char *ip, char *portNumber, std::vector<PacketS
     int count = 0;
     std::string tcpBuffer;
     bool allAcked = false;
-    while(count <11){
-        //++count;
+
+    while(true){
         for(auto &state : states){
             if(state.acknowledged)
                 continue;
@@ -190,8 +202,9 @@ bool CreateUDP(SOCKET &sock_tcp, char *ip, char *portNumber, std::vector<PacketS
         if(allAcked){
             SendAll(sock_tcp, "FIN\n");
             break;
+
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
     return true;
