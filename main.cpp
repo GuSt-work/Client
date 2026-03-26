@@ -45,6 +45,14 @@ void SendFileInfo(SOCKET sock, const char* udp, const char* fileName){
     }
     std::cout << "File info sent: " << message << std::endl;
 }
+bool CheckTime(const std::chrono::steady_clock::time_point &timePt, const int &timeoutMs){
+    if(timePt == std::chrono::steady_clock::time_point{})
+        return true;
+
+    auto now = std::chrono::steady_clock::now();
+    bool result = (std::chrono::duration_cast<std::chrono::milliseconds>(now - timePt).count() > timeoutMs);
+    return result;
+}
 
 bool ParseMessage(SOCKET &serv_sock, std::string& buffer, uint32_t& id){
     char tmp[128];
@@ -78,6 +86,29 @@ bool ParseMessage(SOCKET &serv_sock, std::string& buffer, uint32_t& id){
     return false;
 }
 
+bool IsReadyServer(SOCKET &serv_sock){
+    uint32_t id;
+    std::string buffer;
+
+    const int TIMEOUT_MS = 5000;
+    auto start = std::chrono::steady_clock::now();
+    bool isReady = false;
+
+    while (!isReady) {
+        isReady = ParseMessage(serv_sock, buffer, id);
+
+        if (isReady) return true;
+
+        if (CheckTime(start, TIMEOUT_MS)) {
+            std::cerr << "Server did not respond within timeout\n";
+            break;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return false;
+}
+
 bool ReadFile(const char *filePath, std::vector<char>& data){
     std::ifstream file(filePath, std::ios::binary);
 
@@ -89,7 +120,7 @@ bool ReadFile(const char *filePath, std::vector<char>& data){
     size_t size = file.tellg();
 
     if (size > 10 * 1024 * 1024) {
-        std::cerr << "File very large" << "\n";
+        std::cerr << "File is very large" << "\n";
         return false;
     }
 
@@ -125,14 +156,7 @@ void CreatePacketsState(std::vector<Packet> &packets, std::vector<PacketState> &
     }
 }
 
-bool CheckTime(const std::chrono::steady_clock::time_point &timePt, const int &timeoutMs){
-    if(timePt == std::chrono::steady_clock::time_point{})
-        return true;
 
-    auto now = std::chrono::steady_clock::now();
-    bool result = (std::chrono::duration_cast<std::chrono::milliseconds>(now - timePt).count() > timeoutMs);
-    return result;
-}
 
 bool SendAll(SOCKET &sock, const std::string& message) {
     int totalSent = 0;
@@ -153,8 +177,7 @@ bool SendAll(SOCKET &sock, const std::string& message) {
 }
 
 bool SendPackets(SOCKET &sockTCP, char *ip, char *portNumber, std::vector<PacketState> &states, int timeout){
-    u_long mode = 1;
-    ioctlsocket(sockTCP, FIONBIO, &mode);
+
 
     SOCKET sockUDP = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if(sockUDP == INVALID_SOCKET){
@@ -293,16 +316,12 @@ int main(int argc, char *argv[])
         WSACleanup();
         return -1;
     }
+    u_long mode = 1;
+    ioctlsocket(sock, FIONBIO, &mode);
 
     SendFileInfo(sock, argv[3], argv[4]);
 
-
-    uint32_t id;
-    std::string buffer;
-    bool isReadyServ = false;
-    while(!isReadyServ){
-        isReadyServ = ParseMessage(sock, buffer, id);
-    }
+    bool isReadyServ = IsReadyServer(sock);
     if(!isReadyServ){
         closesocket(sock);
         WSACleanup();
@@ -313,6 +332,7 @@ int main(int argc, char *argv[])
     std::vector<char> myFile;
     bool isReadFile = ReadFile(argv[4], myFile);
     if(!isReadFile){
+        SendAll(sock, "FIN\n");
         closesocket(sock);
         WSACleanup();
         return -1;
